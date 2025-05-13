@@ -4,7 +4,7 @@ session_start();
 
 // Connexion à la base de données avec PDO
 $host = 'localhost';
-$dbname = 'bibliotheque';
+$dbname = 'bibliotheque2';
 $username = 'root'; // Remplacez par votre utilisateur MySQL
 $password = ''; // Remplacez par votre mot de passe MySQL
 
@@ -275,6 +275,8 @@ $section = $_GET['section'] ?? 'dashboard';
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <!-- Bootstrap Icons -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet">
+    <!-- Swiper CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/swiper/swiper-bundle.min.css" />
 
     <style>
         body {
@@ -336,7 +338,6 @@ $section = $_GET['section'] ?? 'dashboard';
         }
 
         .dashboard h2 {
-            /* color: #fec5bb; */
             color: #ff70a6;
             /* Couleur spécifique pour "Bienvenue dans votre Bibliothèque" */
         }
@@ -350,7 +351,7 @@ $section = $_GET['section'] ?? 'dashboard';
 
         .card-title {
             color: #ff70a6;
-            /* Couleur pour les titres des cartes (Livres, Utilisateurs, Emprunts Actifs) */
+            /* Couleur pour les titres des cartes */
         }
 
         .card-title i {
@@ -438,13 +439,15 @@ $section = $_GET['section'] ?? 'dashboard';
             font-weight: bold;
         }
 
-        /* Styles pour les titres des sections Livres, Utilisateurs, Emprunts */
+        /* Styles pour les titres des sections */
         section.list_livres h2,
         section.add_livre h2,
         section.list_utilisateurs h2,
         section.add_utilisateur h2,
         section.list_emprunts h2,
-        section.add_emprunt h2 {
+        section.add_emprunt h2,
+        .bienfaits h2,
+        .featured-books h2 {
             color: #ff70a6;
             /* Couleur pour les titres des sections */
         }
@@ -454,7 +457,9 @@ $section = $_GET['section'] ?? 'dashboard';
         section.list_utilisateurs h2 i,
         section.add_utilisateur h2 i,
         section.list_emprunts h2 i,
-        section.add_emprunt h2 i {
+        section.add_emprunt h2 i,
+        .bienfaits h2 i,
+        .featured-books h2 i {
             color: #ff70a6;
             /* Icônes des titres */
         }
@@ -480,7 +485,83 @@ $section = $_GET['section'] ?? 'dashboard';
         .alert-danger {
             background-color: #fcd5ce;
             /* Fond pour alerte erreur */
+
             color: #d89b94;
+        }
+
+        /* Styles pour l'image d'en-tête */
+        .header-image {
+            background: url('couverture3.jpg') no-repeat center center;
+            background-size: cover;
+            height: 200px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #e6b8b2;
+        }
+
+        .header-image h1 {
+            color: #fff;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+            font-size: 2.5rem;
+            background-color: rgba(250, 225, 221, 0.7); /* #fae1dd avec opacité */
+            padding: 10px 20px;
+            border-radius: 5px;
+        }
+
+        /* Styles pour le carrousel Bienfaits de la lecture */
+        .bienfaits {
+            margin-bottom: 30px;
+        }
+
+        .swiper {
+            width: 100%;
+            height: 300px;
+        }
+
+        .swiper-slide {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            font-size: 1.2rem;
+            background-color: #fff5f3;
+            border: 1px solid #fae1dd;
+            border-radius: 10px;
+            padding: 20px;
+        }
+
+        .swiper-slide h3 {
+            color: #ff70a6;
+        }
+
+        .swiper-slide p {
+            color: #333;
+        }
+
+        /* Styles pour les livres en vedette */
+        .featured-books {
+            margin-bottom: 30px;
+        }
+
+        .featured-books .card {
+            transition: transform 0.3s;
+        }
+
+        .featured-books .card:hover {
+            transform: scale(1.05);
+            background-color: #fcd5ce;
+        }
+
+        .featured-books .card-img-top {
+            height: 200px;
+            object-fit: cover;
+            border-bottom: 1px solid #e6b8b2;
+        }
+
+        .featured-books .card-title {
+            font-size: 1.2rem;
         }
 
         @media (max-width: 768px) {
@@ -503,6 +584,14 @@ $section = $_GET['section'] ?? 'dashboard';
             .sidebar .nav-link {
                 border-bottom: none;
                 border-right: 1px solid #e6b8b2;
+            }
+
+            .header-image h1 {
+                font-size: 1.5rem;
+            }
+
+            .swiper {
+                height: 200px;
             }
         }
     </style>
@@ -564,8 +653,63 @@ $section = $_GET['section'] ?? 'dashboard';
         <!-- Contenu de la section -->
         <?php if ($section === 'dashboard'): ?>
             <div class="dashboard">
-                <h2>Bienvenue dans votre Bibliothèque</h2>
-                <p>Gérez facilement vos livres, utilisateurs et emprunts.</p>
+                <!-- Image d'en-tête -->
+                <div class="header-image">
+                    <h1>Bienvenue dans votre Bibliothèque</h1>
+                </div>
+
+                <!-- Bienfaits de la lecture -->
+                <!-- <div class="bienfaits">
+                    <h2><i class="bi bi-lightbulb"></i> Bienfaits de la Lecture</h2>
+                    <div class="swiper mySwiper">
+                        <div class="swiper-wrapper">
+                            <div class="swiper-slide">
+                                <h3>Amélioration de la Concentration</h3>
+                                <p>La lecture stimule l'attention et la mémoire à long terme.</p>
+                            </div>
+                            <div class="swiper-slide">
+                                <h3>Réduction du Stress</h3>
+                                <p>Une bonne histoire peut apaiser l'esprit en quelques minutes.</p>
+                            </div>
+                            <div class="swiper-slide">
+                                <h3>Développement Personnel</h3>
+                                <p>Apprenez de nouvelles perspectives et élargissez vos horizons.</p>
+                            </div>
+                        </div>
+                        <div class="swiper-button-next"></div>
+                        <div class="swiper-button-prev"></div>
+                        <div class="swiper-pagination"></div>
+                    </div>
+                </div>
+
+                Nos Livres en Vedette -->
+                <!-- <div class="featured-books">
+                    <h2><i class="bi bi-star"></i> Nos Livres en Vedette</h2>
+                    <div class="row">
+                        <?php
+                        // Récupérer quelques livres en vedette (par exemple, les 3 premiers)
+                        $featured_livres = array_slice($livres_disponibles, 0, 3);
+                        foreach ($featured_livres as $livre):
+                        ?>
+                            <div class="col-md-4 mb-4">
+                                <div class="card">
+                                    <img src="https://picsum.photos/200/300?rand<?= $livre['id_livre'] ?>" class="card-img-top" alt="<?= htmlspecialchars($livre['titre']) ?>">
+                                    <div class="card-body">
+                                        <h5 class="card-title"><?= htmlspecialchars($livre['titre']) ?></h5>
+                                        <p class="card-text">Auteur : <?= htmlspecialchars($livre['auteur']) ?></p>
+                                        <p class="card-text">
+                                            Statut : <?= $livre['disponible'] ? '<span class="disponible">Disponible</span>' : '<span class="emprunte">Emprunté</span>' ?>
+                                        </p>
+                                        <a href="?section=add_emprunt" class="btn btn-primary">Emprunter</a>
+                                    </div>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                </div> -->
+
+                <h3>Gérez facilement vos livres, utilisateurs et emprunts.</h3>
+                <!-- <p></p> -->
                 <div class="row mb-4">
                     <div class="col-md-4">
                         <div class="card">
@@ -1008,13 +1152,35 @@ $section = $_GET['section'] ?? 'dashboard';
 
     <!-- Bootstrap JS -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Swiper JS -->
+    <script src="https://unpkg.com/swiper/swiper-bundle.min.js"></script>
     <script>
         // Activer les tooltips
         var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
         var tooltipList = tooltipTriggerList.map(function(tooltipTriggerEl) {
             return new bootstrap.Tooltip(tooltipTriggerEl);
         });
+
+        // Initialiser le Swiper
+        var swiper = new Swiper(".mySwiper", {
+            pagination: {
+                el: ".swiper-pagination",
+                dynamicBullets: true,
+            },
+            navigation: {
+                nextEl: ".swiper-button-next",
+                prevEl: ".swiper-button-prev",
+            },
+            autoplay: {
+                delay: 3000,
+                disableOnInteraction: false,
+            },
+            loop: true,
+        });
     </script>
 </body>
 
 </html>
+```
+
+<?php
