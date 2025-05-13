@@ -4,7 +4,7 @@ session_start();
 
 // Connexion à la base de données avec PDO
 $host = 'localhost';
-$dbname = 'bibliotheque2';
+$dbname = 'bibliotheque';
 $username = 'root'; // Remplacez par votre utilisateur MySQL
 $password = ''; // Remplacez par votre mot de passe MySQL
 
@@ -58,71 +58,137 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // Supprimer un livre
-    if (isset($_POST['action']) && $_POST['action'] === 'delete_livre' && isset($_POST['id_livre'])) {
-        try {
-            $stmt = $pdo->prepare("DELETE FROM livres WHERE id_livre = ?");
-            $stmt->execute([(int)$_POST['id_livre']]);
-            $_SESSION['success_message'] = "Livre supprimé avec succès.";
-        } catch (PDOException $e) {
-            $_SESSION['error_message'] = "Erreur : " . $e->getMessage();
-        }
-    }
-
+  
     // Ajouter ou modifier un utilisateur
     if (isset($_POST['action']) && ($_POST['action'] === 'add_utilisateur' || $_POST['action'] === 'edit_utilisateur')) {
-        $nom = trim($_POST['nom'] ?? '');
-        $prenom = trim($_POST['prenom'] ?? '');
-        $email = filter_var(trim($_POST['email'] ?? ''), FILTER_VALIDATE_EMAIL);
-        $id_utilisateur = isset($_POST['id_utilisateur']) ? (int)$_POST['id_utilisateur'] : null;
+    $nom = trim($_POST['nom'] ?? '');
+    $prenom = trim($_POST['prenom'] ?? '');
+    $email = filter_var(trim($_POST['email'] ?? ''), FILTER_VALIDATE_EMAIL);
+    $id_utilisateur = isset($_POST['id_utilisateur']) ? (int)$_POST['id_utilisateur'] : null;
 
-        if ($nom && $prenom && $email) {
-            try {
-                if ($_POST['action'] === 'add_utilisateur') {
+    if ($nom && $prenom && $email) {
+        try {
+            if ($_POST['action'] === 'add_utilisateur') {
+                // Vérifier si l'email existe déjà
+                $check_stmt = $pdo->prepare("SELECT COUNT(*) FROM utilisateurs WHERE email = ?");
+                $check_stmt->execute([$email]);
+                if ($check_stmt->fetchColumn() > 0) {
+                    $_SESSION['error_message'] = "Cet email est déjà utilisé.";
+                } else {
                     $stmt = $pdo->prepare("INSERT INTO utilisateurs (nom, prenom, email) VALUES (?, ?, ?)");
                     $stmt->execute([$nom, $prenom, $email]);
                     $_SESSION['success_message'] = "Utilisateur ajouté avec succès.";
-                } elseif ($_POST['action'] === 'edit_utilisateur' && $id_utilisateur) {
+                }
+            } elseif ($_POST['action'] === 'edit_utilisateur' && $id_utilisateur) {
+                // Vérifier si l'email est déjà utilisé par un autre utilisateur
+                $check_stmt = $pdo->prepare("SELECT COUNT(*) FROM utilisateurs WHERE email = ? AND id_utilisateur != ?");
+                $check_stmt->execute([$email, $id_utilisateur]);
+                if ($check_stmt->fetchColumn() > 0) {
+                    $_SESSION['error_message'] = "Cet email est déjà utilisé par un autre utilisateur.";
+                } else {
                     $stmt = $pdo->prepare("UPDATE utilisateurs SET nom = ?, prenom = ?, email = ? WHERE id_utilisateur = ?");
                     $stmt->execute([$nom, $prenom, $email, $id_utilisateur]);
                     $_SESSION['success_message'] = "Utilisateur modifié avec succès.";
                 }
-            } catch (PDOException $e) {
-                $_SESSION['error_message'] = "Erreur : " . $e->getMessage();
             }
-        } else {
-            $_SESSION['error_message'] = "Le nom, le prénom et l'email sont requis.";
+        } catch (PDOException $e) {
+            $_SESSION['error_message'] = "Erreur lors de l'opération sur l'utilisateur : " . $e->getMessage();
         }
+    } else {
+        $_SESSION['error_message'] = "Le nom, le prénom et un email valide sont requis.";
     }
+}
 
-    // Supprimer un utilisateur
-    if (isset($_POST['action']) && $_POST['action'] === 'delete_utilisateur' && isset($_POST['id_utilisateur'])) {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // ... (Code existant pour add_livre, edit_livre, add_utilisateur, etc.)
+
+    // Marquer un emprunt comme retourné
+    if (isset($_POST['action']) && $_POST['action'] === 'return_emprunt' && isset($_POST['id_emprunt'])) {
         try {
-            $stmt = $pdo->prepare("DELETE FROM utilisateurs WHERE id_utilisateur = ?");
-            $stmt->execute([(int)$_POST['id_utilisateur']]);
-            $_SESSION['success_message'] = "Utilisateur supprimé avec succès.";
+            $stmt = $pdo->prepare("UPDATE emprunts SET date_retour = NOW() WHERE id_emprunt = ?");
+            $stmt->execute([(int)$_POST['id_emprunt']]);
+            $_SESSION['success_message'] = "Livre retourné avec succès.";
         } catch (PDOException $e) {
             $_SESSION['error_message'] = "Erreur : " . $e->getMessage();
         }
     }
 
-    // Ajouter un emprunt
-    if (isset($_POST['action']) && $_POST['action'] === 'add_emprunt') {
-        $id_livre = (int)$_POST['id_livre'] ?? 0;
-        $id_utilisateur = (int)$_POST['id_utilisateur'] ?? 0;
+    // AJOUTER ICI : Supprimer un livre
+    if (isset($_POST['action']) && $_POST['action'] === 'delete_livre' && isset($_POST['id_livre'])) {
+        try {
+            $id_livre = (int)$_POST['id_livre'];
+            $check_stmt = $pdo->prepare("SELECT COUNT(*) FROM emprunts WHERE id_livre = ? AND date_retour IS NULL");
+            $check_stmt->execute([$id_livre]);
+            if ($check_stmt->fetchColumn() > 0) {
+                $_SESSION['error_message'] = "Impossible de supprimer ce livre : il est actuellement emprunté.";
+            } else {
+                $stmt = $pdo->prepare("DELETE FROM livres WHERE id_livre = ?");
+                $stmt->execute([$id_livre]);
+                $_SESSION['success_message'] = "Livre supprimé avec succès.";
+            }
+        } catch (PDOException $e) {
+            $_SESSION['error_message'] = "Erreur lors de la suppression du livre : " . $e->getMessage();
+        }
+    }
 
-        if ($id_livre && $id_utilisateur) {
-            try {
+    // AJOUTER ICI : Supprimer un utilisateur
+    if (isset($_POST['action']) && $_POST['action'] === 'delete_utilisateur' && isset($_POST['id_utilisateur'])) {
+        try {
+            $id_utilisateur = (int)$_POST['id_utilisateur'];
+            $check_stmt = $pdo->prepare("SELECT COUNT(*) FROM emprunts WHERE id_utilisateur = ? AND date_retour IS NULL");
+            $check_stmt->execute([$id_utilisateur]);
+            if ($check_stmt->fetchColumn() > 0) {
+                $_SESSION['error_message'] = "Impossible de supprimer cet utilisateur : il a des emprunts actifs.";
+            } else {
+                $stmt = $pdo->prepare("DELETE FROM utilisateurs WHERE id_utilisateur = ?");
+                $stmt->execute([$id_utilisateur]);
+                $_SESSION['success_message'] = "Utilisateur supprimé avec succès.";
+            }
+        } catch (PDOException $e) {
+            $_SESSION['error_message'] = "Erreur lors de la suppression de l'utilisateur : " . $e->getMessage();
+        }
+    }
+
+    // Redirection après action pour éviter resoumission
+    $redirect_section = 'dashboard';
+    if (isset($_POST['action'])) {
+        if (strpos($_POST['action'], 'livre') !== false) {
+            $redirect_section = 'list_livres';
+        } elseif (strpos($_POST['action'], 'utilisateur') !== false) {
+            $redirect_section = 'list_utilisateurs';
+        } elseif (strpos($_POST['action'], 'emprunt') !== false) {
+            $redirect_section = 'list_emprunts';
+        }
+    }
+    header("Location: dashboard.php?section=$redirect_section");
+    exit;
+}
+
+    // Ajouter un emprunt
+   
+    if (isset($_POST['action']) && $_POST['action'] === 'add_emprunt') {
+    $id_livre = (int)$_POST['id_livre'] ?? 0;
+    $id_utilisateur = (int)$_POST['id_utilisateur'] ?? 0;
+
+    if ($id_livre && $id_utilisateur) {
+        try {
+            // Vérifier si le livre est déjà emprunté
+            $check_stmt = $pdo->prepare("SELECT COUNT(*) FROM emprunts WHERE id_livre = ? AND date_retour IS NULL");
+            $check_stmt->execute([$id_livre]);
+            if ($check_stmt->fetchColumn() > 0) {
+                $_SESSION['error_message'] = "Ce livre est déjà emprunté.";
+            } else {
                 $stmt = $pdo->prepare("INSERT INTO emprunts (id_livre, id_utilisateur, date_emprunt) VALUES (?, ?, NOW())");
                 $stmt->execute([$id_livre, $id_utilisateur]);
                 $_SESSION['success_message'] = "Emprunt enregistré avec succès.";
-            } catch (PDOException $e) {
-                $_SESSION['error_message'] = "Erreur : " . $e->getMessage();
             }
-        } else {
-            $_SESSION['error_message'] = "Veuillez sélectionner un livre et un utilisateur.";
+        } catch (PDOException $e) {
+            $_SESSION['error_message'] = "Erreur lors de l'enregistrement de l'emprunt : " . $e->getMessage();
         }
+    } else {
+        $_SESSION['error_message'] = "Veuillez sélectionner un livre et un utilisateur.";
     }
+}
 
     // Marquer un emprunt comme retourné
     if (isset($_POST['action']) && $_POST['action'] === 'return_emprunt' && isset($_POST['id_emprunt'])) {
