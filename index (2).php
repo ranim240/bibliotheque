@@ -32,14 +32,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($titre && $auteur) {
             try {
-                if ($_POST['action'] === 'add_livre') {
-                    $stmt = $pdo->prepare("INSERT INTO livres (titre, auteur, annee, genre) VALUES (?, ?, ?, ?)");
-                    $stmt->execute([$titre, $auteur, $annee ?: null, $genre]);
-                    $_SESSION['success_message'] = "Livre ajouté avec succès.";
-                } elseif ($_POST['action'] === 'edit_livre' && $id_livre) {
-                    $stmt = $pdo->prepare("UPDATE livres SET titre = ?, auteur = ?, annee = ?, genre = ? WHERE id_livre = ?");
-                    $stmt->execute([$titre, $auteur, $annee ?: null, $genre, $id_livre]);
-                    $_SESSION['success_message'] = "Livre modifié avec succès.";
+                // Vérifier si le livre existe déjà (basé sur titre et auteur)
+                $check_stmt = $pdo->prepare("SELECT COUNT(*) FROM livres WHERE titre = ? AND auteur = ? AND id_livre != ?");
+                $check_stmt->execute([$titre, $auteur, $id_livre ?: 0]);
+                $exists = $check_stmt->fetchColumn();
+
+                if ($exists > 0 && $_POST['action'] === 'add_livre') {
+                    $_SESSION['error_message'] = "Un livre avec ce titre et cet auteur existe déjà.";
+                } else {
+                    if ($_POST['action'] === 'add_livre') {
+                        $stmt = $pdo->prepare("INSERT INTO livres (titre, auteur, annee, genre) VALUES (?, ?, ?, ?)");
+                        $stmt->execute([$titre, $auteur, $annee ?: null, $genre]);
+                        $_SESSION['success_message'] = "Livre ajouté avec succès.";
+                    } elseif ($_POST['action'] === 'edit_livre' && $id_livre) {
+                        $stmt = $pdo->prepare("UPDATE livres SET titre = ?, auteur = ?, annee = ?, genre = ? WHERE id_livre = ?");
+                        $stmt->execute([$titre, $auteur, $annee ?: null, $genre, $id_livre]);
+                        $_SESSION['success_message'] = "Livre modifié avec succès.";
+                    }
                 }
             } catch (PDOException $e) {
                 $_SESSION['error_message'] = "Erreur : " . $e->getMessage();
@@ -141,39 +150,115 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 
-// Récupérer tous les livres
+// Récupérer tous les genres distincts pour le filtre
+$stmt = $pdo->query("SELECT DISTINCT genre FROM livres WHERE genre IS NOT NULL AND genre != '' ORDER BY genre");
+$genres = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+// Récupérer tous les livres avec filtrage par genre, année et recherche
 $livres_query = "SELECT * FROM livres";
+$livres_params = [];
+$where_clauses = [];
+
+if (isset($_GET['filter_genre']) && !empty($_GET['filter_genre']) && $_GET['filter_genre'] !== 'all') {
+    $where_clauses[] = "genre = ?";
+    $livres_params[] = $_GET['filter_genre'];
+}
+
 if (isset($_GET['search_livre']) && !empty($_GET['search_livre'])) {
     $search = '%' . trim($_GET['search_livre']) . '%';
-    $livres_query .= " WHERE titre LIKE ? OR auteur LIKE ?";
-    $stmt = $pdo->prepare($livres_query);
-    $stmt->execute([$search, $search]);
-} else {
-    $stmt = $pdo->query($livres_query);
+    $where_clauses[] = "(titre LIKE ? OR auteur LIKE ?)";
+    $livres_params[] = $search;
+    $livres_params[] = $search;
 }
+
+if (isset($_GET['filter_annee']) && !empty($_GET['filter_annee'])) {
+    $where_clauses[] = "annee = ?";
+    $livres_params[] = (int)$_GET['filter_annee'];
+}
+
+if (!empty($where_clauses)) {
+    $livres_query .= " WHERE " . implode(" AND ", $where_clauses);
+}
+
+$stmt = $pdo->prepare($livres_query);
+$stmt->execute($livres_params);
 $livres = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-// Récupérer tous les utilisateurs
+// Vérifier la disponibilité des livres
+$emprunts_actifs = $pdo->query("SELECT id_livre FROM emprunts WHERE date_retour IS NULL")->fetchAll(PDO::FETCH_COLUMN);
+$livres_disponibles = array_map(function ($livre) use ($emprunts_actifs) {
+    $livre['disponible'] = !in_array($livre['id_livre'], $emprunts_actifs);
+    return $livre;
+}, $livres);
+
+// Récupérer tous les utilisateurs avec recherche par nom ou email
 $utilisateurs_query = "SELECT * FROM utilisateurs";
+$utilisateurs_params = [];
+$where_clauses = [];
+
 if (isset($_GET['search_utilisateur']) && !empty($_GET['search_utilisateur'])) {
     $search = '%' . trim($_GET['search_utilisateur']) . '%';
-    $utilisateurs_query .= " WHERE nom LIKE ?";
-    $stmt = $pdo->prepare($utilisateurs_query);
-    $stmt->execute([$search]);
-} else {
-    $stmt = $pdo->query($utilisateurs_query);
+    $where_clauses[] = "(nom LIKE ? OR email LIKE ?)";
+    $utilisateurs_params[] = $search;
+    $utilisateurs_params[] = $search;
 }
+
+if (!empty($where_clauses)) {
+    $utilisateurs_query .= " WHERE " . implode(" AND ", $where_clauses);
+}
+
+$stmt = $pdo->prepare($utilisateurs_query);
+$stmt->execute($utilisateurs_params);
 $utilisateurs = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-// Récupérer tous les emprunts
-$stmt = $pdo->query("
+// Récupérer tous les emprunts avec filtrage par statut et date
+$emprunts_query = "
     SELECT e.id_emprunt, e.id_livre, e.id_utilisateur, e.date_emprunt, e.date_retour, 
            l.titre, u.nom, u.prenom 
     FROM emprunts e 
     JOIN livres l ON e.id_livre = l.id_livre 
     JOIN utilisateurs u ON e.id_utilisateur = u.id_utilisateur
-");
+";
+$where_clauses = [];
+$emprunts_params = [];
+
+$filter = $_GET['filter_emprunts'] ?? 'all';
+if ($filter === 'active') {
+    $where_clauses[] = "e.date_retour IS NULL";
+} elseif ($filter === 'returned') {
+    $where_clauses[] = "e.date_retour IS NOT NULL";
+}
+
+if (isset($_GET['date_debut']) && !empty($_GET['date_debut'])) {
+    $where_clauses[] = "e.date_emprunt >= ?";
+    $emprunts_params[] = $_GET['date_debut'];
+}
+
+if (isset($_GET['date_fin']) && !empty($_GET['date_fin'])) {
+    $where_clauses[] = "e.date_emprunt <= ?";
+    $emprunts_params[] = $_GET['date_fin'];
+}
+
+if (!empty($where_clauses)) {
+    $emprunts_query .= " WHERE " . implode(" AND ", $where_clauses);
+}
+
+$emprunts_query .= " ORDER BY e.date_emprunt DESC LIMIT 5"; // Limiter à 5 pour l'aperçu
+$stmt = $pdo->prepare($emprunts_query);
+$stmt->execute($emprunts_params);
 $emprunts = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Statistiques : Nombre d'emprunts par utilisateur
+$stats_query = "
+    SELECT u.id_utilisateur, u.nom, u.prenom, 
+           COUNT(e.id_emprunt) as total_emprunts, 
+           SUM(CASE WHEN e.date_retour IS NULL THEN 1 ELSE 0 END) as emprunts_actifs
+    FROM utilisateurs u
+    LEFT JOIN emprunts e ON u.id_utilisateur = e.id_utilisateur
+    GROUP BY u.id_utilisateur, u.nom, u.prenom
+    ORDER BY total_emprunts DESC
+";
+$stats = $pdo->query($stats_query)->fetchAll(PDO::FETCH_ASSOC);
 
 // Déterminer la section active
 $section = $_GET['section'] ?? 'dashboard';
@@ -188,85 +273,652 @@ $section = $_GET['section'] ?? 'dashboard';
     <title>Dashboard - Gestion de Bibliothèque</title>
     <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
+    <!-- Bootstrap Icons -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet">
+    <!-- <style>
         body {
-            padding: 20px;
+            display: flex;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #f8f9fa;
         }
 
-        .nav-item .nav-link.active {
-            background-color: #2E7D32;
-            color: white;
+        .sidebar {
+            width: 250px;
+            background-color: #1e3a8a;
+            min-height: 100vh;
+            padding-top: 20px;
+            position: fixed;
+            top: 0;
+            left: 0;
+        }
+
+        .sidebar .nav {
+            flex-direction: column;
+        }
+
+        .sidebar .nav-link {
+            color: white !important;
+            padding: 10px 20px;
+            border-radius: 0;
+            margin: 0;
+            border-bottom: 1px solid #1d4ed8;
+        }
+
+        .sidebar .nav-link:hover {
+            background-color: #3b82f6;
+        }
+
+        .sidebar .nav-link.active {
+            background-color: #1d4ed8;
+            border-color: #1d4ed8;
+        }
+
+        .sidebar .nav-link i {
+            margin-right: 10px;
+        }
+
+        .content {
+            margin-left: 250px;
+            padding: 20px;
+            width: calc(100% - 250px);
         }
 
         .dashboard {
             text-align: center;
-            margin-top: 20px;
         }
 
         .dashboard h2 {
-            color: #4CAF50;
+            color: #1e3a8a;
+        }
+
+        .card {
+            border-color: #1e3a8a;
+        }
+
+        .card-title {
+            color: #1e3a8a;
+        }
+
+        .btn-primary {
+            background-color: #1e3a8a;
+            border-color: #1e3a8a;
+        }
+
+        .btn-primary:hover {
+            background-color: #3b82f6;
+            border-color: #3b82f6;
+        }
+
+        .btn-warning {
+            background-color: #f59e0b;
+            border-color: #f59e0b;
+        }
+
+        .btn-warning:hover {
+            background-color: #d97706;
+            border-color: #d97706;
+        }
+
+        .btn-success {
+            background-color: #15803d;
+            border-color: #15803d;
+        }
+
+        .btn-success:hover {
+            background-color: #16a34a;
+            border-color: #16a34a;
+        }
+
+        .btn-secondary {
+            background-color: #6b7280;
+            border-color: #6b7280;
+        }
+
+        .btn-secondary:hover {
+            background-color: #4b5563;
+            border-color: #4b5563;
         }
 
         .actions {
             display: flex;
             gap: 10px;
+            justify-content: center;
+        }
+
+        .bi {
+            margin-right: 5px;
+        }
+
+        .table th,
+        .table td {
+            vertical-align: middle;
+        }
+
+        .disponible {
+            color: #15803d;
+            font-weight: bold;
+        }
+
+        .emprunte {
+            color: #dc2626;
+            font-weight: bold;
+        }
+
+        .form-section {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .alert {
+            position: sticky;
+            top: 20px;
+            z-index: 1000;
+        }
+
+        @media (max-width: 768px) {
+            .sidebar {
+                width: 100%;
+                height: auto;
+                position: relative;
+            }
+
+            .content {
+                margin-left: 0;
+                width: 100%;
+            }
+
+            .sidebar .nav {
+                flex-direction: row;
+                flex-wrap: wrap;
+            }
+
+            .sidebar .nav-link {
+                border-bottom: none;
+                border-right: 1px solid #1d4ed8;
+            }
+        }
+    </style> -->
+    <!-- <style>
+        body {
+            display: flex;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #f7d1cd;
+            /* Couleur secondaire pour le fond */
+        }
+
+        .sidebar {
+            width: 250px;
+            background-color: #e8c2ca;
+            /* Couleur principale */
+            min-height: 100vh;
+            padding-top: 20px;
+            position: fixed;
+            top: 0;
+            left: 0;
+        }
+
+        .sidebar .nav {
+            flex-direction: column;
+        }
+
+        .sidebar .nav-link {
+            color: #fff !important;
+            /* Texte blanc pour contraste */
+            padding: 10px 20px;
+            border-radius: 0;
+            margin: 0;
+            border-bottom: 1px solid #d9a7b0;
+            /* Variation plus foncée de #e8c2ca */
+        }
+
+        .sidebar .nav-link:hover {
+            background-color: #fcd5ce;
+            /* Couleur d'accent pour survol */
+        }
+
+        .sidebar .nav-link.active {
+            background-color: #d9a7b0;
+            /* Variation plus foncée pour l'élément actif */
+            border-color: #d9a7b0;
+        }
+
+        .sidebar .nav-link i {
+            margin-right: 10px;
+        }
+
+        .content {
+            margin-left: 250px;
+            padding: 20px;
+            width: calc(100% - 250px);
+        }
+
+        .dashboard {
+            text-align: center;
+        }
+
+        .dashboard h2 {
+            color: #e8c2ca;
+            /* Couleur principale pour les titres */
+        }
+
+        .card {
+            border-color: #e8c2ca;
+            /* Bordures des cartes */
+            background-color: #fcd5ce;
+            /* Fond des cartes */
+        }
+
+        .card-title {
+            color: #e8c2ca;
+            /* Titres des cartes */
+        }
+
+        .btn-primary {
+            background-color: #e8c2ca;
+            /* Boutons principaux */
+            border-color: #e8c2ca;
+        }
+
+        .btn-primary:hover {
+            background-color: #fcd5ce;
+            /* Survol des boutons principaux */
+            border-color: #fcd5ce;
+        }
+
+        .btn-warning {
+            background-color: #d9a7b0;
+            /* Variation pour les boutons d'édition */
+            border-color: #d9a7b0;
+        }
+
+        .btn-warning:hover {
+            background-color: #fcd5ce;
+            /* Survol */
+            border-color: #fcd5ce;
+        }
+
+        .btn-success {
+            background-color: #e8c2ca;
+            /* Boutons de succès (retour d'emprunt) */
+            border-color: #e8c2ca;
+        }
+
+        .btn-success:hover {
+            background-color: #fcd5ce;
+            /* Survol */
+            border-color: #fcd5ce;
+        }
+
+        .btn-secondary {
+            background-color: #f7d1cd;
+            /* Boutons secondaires */
+            border-color: #f7d1cd;
+        }
+
+        .btn-secondary:hover {
+            background-color: #fcd5ce;
+            /* Survol */
+            border-color: #fcd5ce;
+        }
+
+        .actions {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+
+        .bi {
+            margin-right: 5px;
+        }
+
+        .table th,
+        .table td {
+            vertical-align: middle;
+        }
+
+        .disponible {
+            color: #8b5a6b;
+            /* Couleur plus foncée pour contraste */
+            font-weight: bold;
+        }
+
+        .emprunte {
+            color: #a66b7a;
+            /* Variation pour les livres empruntés */
+            font-weight: bold;
+        }
+
+        .form-section {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .alert {
+            position: sticky;
+            top: 20px;
+            z-index: 1000;
+        }
+
+        @media (max-width: 768px) {
+            .sidebar {
+                width: 100%;
+                height: auto;
+                position: relative;
+            }
+
+            .content {
+                margin-left: 0;
+                width: 100%;
+            }
+
+            .sidebar .nav {
+                flex-direction: row;
+                flex-wrap: wrap;
+            }
+
+            .sidebar .nav-link {
+                border-bottom: none;
+                border-right: 1px solid #d9a7b0;
+            }
+        }
+    </style> -->
+    <style>
+        body {
+            display: flex;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #fff5f3;
+            /* Variation claire de #fae1dd pour le fond */
+        }
+
+        .sidebar {
+            width: 250px;
+            background-color: #fae1dd;
+            /* Couleur principale */
+            min-height: 100vh;
+            padding-top: 20px;
+            position: fixed;
+            top: 0;
+            left: 0;
+        }
+
+        .sidebar .nav {
+            flex-direction: column;
+        }
+
+        .sidebar .nav-link {
+            color: #333 !important;
+            /* Texte sombre pour contraste */
+            padding: 10px 20px;
+            border-radius: 0;
+            margin: 0;
+            border-bottom: 1px solid #e6b8b2;
+            /* Variation plus foncée de #fae1dd */
+        }
+
+        .sidebar .nav-link:hover {
+            background-color: #fcd5ce;
+            /* Couleur d'accent pour survol */
+        }
+
+        .sidebar .nav-link.active {
+            background-color: #e6b8b2;
+            /* Variation plus foncée pour l'élément actif */
+            border-color: #e6b8b2;
+        }
+
+        .sidebar .nav-link i {
+            margin-right: 10px;
+        }
+
+        .content {
+            margin-left: 250px;
+            padding: 20px;
+            width: calc(100% - 250px);
+        }
+
+        .dashboard {
+            text-align: center;
+        }
+
+        .dashboard h2 {
+            /* color: #fec5bb; */
+            color: #ff70a6;
+            /* Couleur spécifique pour "Bienvenue dans votre Bibliothèque" */
+        }
+
+        .card {
+            border-color: #fae1dd;
+            /* Bordures des cartes */
+            background-color: #fff5f3;
+            /* Fond clair pour les cartes */
+        }
+
+        .card-title {
+            color: #ff70a6;
+            /* Couleur pour les titres des cartes (Livres, Utilisateurs, Emprunts Actifs) */
+        }
+
+        .card-title i {
+            color: #ff70a6;
+            /* Icônes des titres des cartes */
+        }
+
+        .btn-primary {
+            background-color: #fae1dd;
+            /* Boutons principaux */
+            border-color: #fae1dd;
+            color: #333;
+            /* Texte sombre pour lisibilité */
+        }
+
+        .btn-primary:hover {
+            background-color: #fcd5ce;
+            /* Survol des boutons principaux */
+            border-color: #fcd5ce;
+        }
+
+        .btn-warning {
+            background-color: #e6b8b2;
+            /* Variation pour les boutons d'édition */
+            border-color: #e6b8b2;
+            color: #333;
+        }
+
+        .btn-warning:hover {
+            background-color: #fcd5ce;
+            /* Survol */
+            border-color: #fcd5ce;
+        }
+
+        .btn-success {
+            background-color: #fae1dd;
+            /* Boutons de succès (retour d'emprunt) */
+            border-color: #fae1dd;
+            color: #333;
+        }
+
+        .btn-success:hover {
+            background-color: #fcd5ce;
+            /* Survol */
+            border-color: #fcd5ce;
+        }
+
+        .btn-secondary {
+            background-color: #f7d1cd;
+            /* Boutons secondaires */
+            border-color: #f7d1cd;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background-color: #fcd5ce;
+            /* Survol */
+            border-color: #fcd5ce;
+        }
+
+        .actions {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+
+        .bi {
+            margin-right: 5px;
+        }
+
+        .table th,
+        .table td {
+            vertical-align: middle;
+        }
+
+        .disponible {
+            color: #d89b94;
+            /* Variation plus foncée pour contraste */
+            font-weight: bold;
+        }
+
+        .emprunte {
+            color: #e6b8b2;
+            /* Variation pour les livres empruntés */
+            font-weight: bold;
+        }
+
+        /* Styles pour les titres des sections Livres, Utilisateurs, Emprunts */
+        section.list_livres h2,
+        section.add_livre h2,
+        section.list_utilisateurs h2,
+        section.add_utilisateur h2,
+        section.list_emprunts h2,
+        section.add_emprunt h2 {
+            color: #ff70a6;
+            /* Couleur pour les titres des sections */
+        }
+
+        section.list_livres h2 i,
+        section.add_livre h2 i,
+        section.list_utilisateurs h2 i,
+        section.add_utilisateur h2 i,
+        section.list_emprunts h2 i,
+        section.add_emprunt h2 i {
+            color: #ff70a6;
+            /* Icônes des titres */
+        }
+
+        .form-section {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .alert {
+            position: sticky;
+            top: 20px;
+            z-index: 1000;
+        }
+
+        .alert-success {
+            background-color: #fff5f3;
+            /* Fond clair pour alerte succès */
+            color: #d89b94;
+            /* Texte contrasté */
+        }
+
+        .alert-danger {
+            background-color: #fcd5ce;
+            /* Fond pour alerte erreur */
+            color: #d89b94;
+        }
+
+        @media (max-width: 768px) {
+            .sidebar {
+                width: 100%;
+                height: auto;
+                position: relative;
+            }
+
+            .content {
+                margin-left: 0;
+                width: 100%;
+            }
+
+            .sidebar .nav {
+                flex-direction: row;
+                flex-wrap: wrap;
+            }
+
+            .sidebar .nav-link {
+                border-bottom: none;
+                border-right: 1px solid #e6b8b2;
+            }
         }
     </style>
 </head>
 
 <body>
-    <div class="container">
-        <h1 class="text-center mb-4">Dashboard - Gestion de Bibliothèque</h1>
-
+    <div class="sidebar">
+        <nav class="nav flex-column">
+            <a class="nav-link <?= $section === 'dashboard' ? 'active' : '' ?>" href="?section=dashboard">
+                <i class="bi bi-house-door"></i> Accueil
+            </a>
+            <a class="nav-link <?= in_array($section, ['add_livre', 'list_livres']) ? 'active' : '' ?>" href="?section=list_livres">
+                <i class="bi bi-book"></i> Livres
+            </a>
+            <a class="nav-link <?= $section === 'add_livre' ? 'active' : '' ?>" href="?section=add_livre" style="padding-left: 40px;">
+                <i class="bi bi-plus-circle"></i> Ajouter
+            </a>
+            <a class="nav-link <?= $section === 'list_livres' ? 'active' : '' ?>" href="?section=list_livres" style="padding-left: 40px;">
+                <i class="bi bi-list"></i> Liste
+            </a>
+            <a class="nav-link <?= in_array($section, ['add_utilisateur', 'list_utilisateurs']) ? 'active' : '' ?>" href="?section=list_utilisateurs">
+                <i class="bi bi-people"></i> Utilisateurs
+            </a>
+            <a class="nav-link <?= $section === 'add_utilisateur' ? 'active' : '' ?>" href="?section=add_utilisateur" style="padding-left: 40px;">
+                <i class="bi bi-plus-circle"></i> Ajouter
+            </a>
+            <a class="nav-link <?= $section === 'list_utilisateurs' ? 'active' : '' ?>" href="?section=list_utilisateurs" style="padding-left: 40px;">
+                <i class="bi bi-list"></i> Liste
+            </a>
+            <a class="nav-link <?= in_array($section, ['add_emprunt', 'list_emprunts']) ? 'active' : '' ?>" href="?section=list_emprunts">
+                <i class="bi bi-arrow-right-circle"></i> Emprunts
+            </a>
+            <a class="nav-link <?= $section === 'add_emprunt' ? 'active' : '' ?>" href="?section=add_emprunt" style="padding-left: 40px;">
+                <i class="bi bi-plus-circle"></i> Ajouter
+            </a>
+            <a class="nav-link <?= $section === 'list_emprunts' ? 'active' : '' ?>" href="?section=list_emprunts" style="padding-left: 40px;">
+                <i class="bi bi-list"></i> Liste
+            </a>
+            <a class="nav-link <?= $section === 'stats' ? 'active' : '' ?>" href="?section=stats">
+                <i class="bi bi-bar-chart"></i> Statistiques
+            </a>
+        </nav>
+    </div>
+    <div class="content">
         <!-- Afficher les messages -->
         <?php if ($success_message): ?>
             <div class="alert alert-success alert-dismissible fade show" role="alert">
-                <?= htmlspecialchars($success_message) ?>
+                <i class="bi bi-check-circle-fill"></i> <?= htmlspecialchars($success_message) ?>
                 <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
             </div>
         <?php endif; ?>
         <?php if ($error_message): ?>
             <div class="alert alert-danger alert-dismissible fade show" role="alert">
-                <?= htmlspecialchars($error_message) ?>
+                <i class="bi bi-exclamation-triangle-fill"></i> <?= htmlspecialchars($error_message) ?>
                 <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
             </div>
         <?php endif; ?>
 
-        <!-- Menu de navigation -->
-        <ul class="nav nav-tabs mb-4">
-            <li class="nav-item">
-                <a class="nav-link <?= $section === 'dashboard' ? 'active' : '' ?>" href="?section=dashboard">Accueil</a>
-            </li>
-            <li class="nav-item">
-                <a class="nav-link <?= $section === 'add_livre' ? 'active' : '' ?>" href="?section=add_livre">Ajouter un livre</a>
-            </li>
-            <li class="nav-item">
-                <a class="nav-link <?= $section === 'add_utilisateur' ? 'active' : '' ?>" href="?section=add_utilisateur">Ajouter un utilisateur</a>
-            </li>
-            <li class="nav-item">
-                <a class="nav-link <?= $section === 'list_livres' ? 'active' : '' ?>" href="?section=list_livres">Liste des livres</a>
-            </li>
-            <li class="nav-item">
-                <a class="nav-link <?= $section === 'list_utilisateurs' ? 'active' : '' ?>" href="?section=list_utilisateurs">Liste des utilisateurs</a>
-            </li>
-            <li class="nav-item">
-                <a class="nav-link <?= $section === 'add_emprunt' ? 'active' : '' ?>" href="?section=add_emprunt">Ajouter un emprunt</a>
-            </li>
-            <li class="nav-item">
-                <a class="nav-link <?= $section === 'list_emprunts' ? 'active' : '' ?>" href="?section=list_emprunts">Liste des emprunts</a>
-            </li>
-        </ul>
-
         <!-- Contenu de la section -->
         <?php if ($section === 'dashboard'): ?>
             <div class="dashboard">
-                <h2>Bienvenue sur le Dashboard</h2>
-                <p>Utilisez le menu ci-dessus pour gérer les livres, les utilisateurs et les emprunts de la bibliothèque.</p>
-                <div class="row text-center">
+                <h2>Bienvenue dans votre Bibliothèque</h2>
+                <p>Gérez facilement vos livres, utilisateurs et emprunts.</p>
+                <div class="row mb-4">
                     <div class="col-md-4">
                         <div class="card">
                             <div class="card-body">
-                                <h5 class="card-title">Nombre de livres</h5>
+                                <h5 class="card-title"><i class="bi bi-book"></i> Livres</h5>
                                 <p class="card-text"><?= count($livres) ?></p>
                             </div>
                         </div>
@@ -274,7 +926,7 @@ $section = $_GET['section'] ?? 'dashboard';
                     <div class="col-md-4">
                         <div class="card">
                             <div class="card-body">
-                                <h5 class="card-title">Nombre d'utilisateurs</h5>
+                                <h5 class="card-title"><i class="bi bi-people"></i> Utilisateurs</h5>
                                 <p class="card-text"><?= count($utilisateurs) ?></p>
                             </div>
                         </div>
@@ -282,54 +934,116 @@ $section = $_GET['section'] ?? 'dashboard';
                     <div class="col-md-4">
                         <div class="card">
                             <div class="card-body">
-                                <h5 class="card-title">Nombre d'emprunts actifs</h5>
+                                <h5 class="card-title"><i class="bi bi-arrow-right-circle"></i> Emprunts Actifs</h5>
                                 <p class="card-text"><?= count(array_filter($emprunts, fn($e) => is_null($e['date_retour']))) ?></p>
                             </div>
                         </div>
                     </div>
                 </div>
+                <div class="mb-4">
+                    <h4>Actions Rapides</h4>
+                    <div class="d-flex justify-content-center gap-3">
+                        <a href="?section=add_livre" class="btn btn-primary"><i class="bi bi-book"></i> Ajouter un Livre</a>
+                        <a href="?section=add_emprunt" class="btn btn-primary"><i class="bi bi-arrow-right-circle"></i> Nouvel Emprunt</a>
+                        <a href="?section=add_utilisateur" class="btn btn-primary"><i class="bi bi-person-plus"></i> Ajouter un Utilisateur</a>
+                    </div>
+                </div>
+                <div>
+                    <h4>Derniers Emprunts</h4>
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <th>Livre</th>
+                                    <th>Utilisateur</th>
+                                    <th>Date d'Emprunt</th>
+                                    <th>Statut</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($emprunts as $emprunt): ?>
+                                    <tr>
+                                        <td><?= htmlspecialchars($emprunt['titre']) ?></td>
+                                        <td><?= htmlspecialchars($emprunt['nom']) ?> <?= htmlspecialchars($emprunt['prenom']) ?></td>
+                                        <td><?= htmlspecialchars($emprunt['date_emprunt']) ?></td>
+                                        <td>
+                                            <?php if (is_null($emprunt['date_retour'])): ?>
+                                                <span class="disponible">Actif</span>
+                                            <?php else: ?>
+                                                <span class="emprunte">Retourné</span>
+                                            <?php endif; ?>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                    <a href="?section=list_emprunts" class="btn btn-secondary">Voir tous les emprunts</a>
+                </div>
             </div>
 
         <?php elseif ($section === 'add_livre'): ?>
             <!-- Formulaire pour ajouter un livre -->
-            <h2>Ajouter un livre</h2>
-            <form method="post" class="row g-3">
-                <input type="hidden" name="action" value="add_livre">
-                <div class="col-md-6">
-                    <label for="titre" class="form-label">Titre</label>
-                    <input type="text" class="form-control" name="titre" id="titre" placeholder="Titre" required>
-                </div>
-                <div class="col-md-6">
-                    <label for="auteur" class="form-label">Auteur</label>
-                    <input type="text" class="form-control" name="auteur" id="auteur" placeholder="Auteur" required>
-                </div>
-                <div class="col-md-6">
-                    <label for="annee" class="form-label">Année</label>
-                    <input type="number" class="form-control" name="annee" id="annee" placeholder="Année">
-                </div>
-                <div class="col-md-6">
-                    <label for="genre" class="form-label">Genre</label>
-                    <input type="text" class="form-control" name="genre" id="genre" placeholder="Genre">
-                </div>
-                <div class="col-12">
-                    <button type="submit" class="btn btn-primary">Ajouter</button>
-                </div>
-            </form>
+            <div class="form-section">
+                <h2><i class="bi bi-book"></i> Ajouter un Livre</h2>
+                <form method="post" class="row g-3">
+                    <input type="hidden" name="action" value="add_livre">
+                    <div class="col-md-6">
+                        <label for="titre" class="form-label">Titre <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" name="titre" id="titre" placeholder="Ex. Le Petit Prince" required>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="auteur" class="form-label">Auteur <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" name="auteur" id="auteur" placeholder="Ex. Antoine de Saint-Exupéry" required>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="annee" class="form-label">Année</label>
+                        <input type="number" class="form-control" name="annee" id="annee" placeholder="Ex. 1943">
+                    </div>
+                    <div class="col-md-6">
+                        <label for="genre" class="form-label">Genre</label>
+                        <input type="text" class="form-control" name="genre" id="genre" placeholder="Ex. Conte">
+                    </div>
+                    <div class="col-12 d-flex justify-content-between">
+                        <a href="?section=dashboard" class="btn btn-secondary"><i class="bi bi-arrow-left"></i> Retour</a>
+                        <button type="submit" class="btn btn-primary"><i class="bi bi-plus-circle"></i> Ajouter le Livre</button>
+                    </div>
+                </form>
+            </div>
 
         <?php elseif ($section === 'list_livres'): ?>
-            <!-- Formulaire de recherche pour les livres -->
-            <h2>Liste des livres</h2>
+            <!-- Liste des livres -->
+            <h2><i class="bi bi-book-fill"></i> Liste des Livres</h2>
             <form method="get" class="mb-3">
                 <input type="hidden" name="section" value="list_livres">
-                <div class="input-group">
-                    <input type="text" class="form-control" name="search_livre" placeholder="Rechercher par titre ou auteur..." value="<?= htmlspecialchars($_GET['search_livre'] ?? '') ?>">
-                    <button type="submit" class="btn btn-primary">Rechercher</button>
-                    <?php if (isset($_GET['search_livre']) && !empty($_GET['search_livre'])): ?>
-                        <a href="?section=list_livres" class="btn btn-secondary">Réinitialiser</a>
-                    <?php endif; ?>
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label for="filter_genre" class="form-label">Filtrer par Genre</label>
+                        <select name="filter_genre" id="filter_genre" class="form-select" onchange="this.form.submit()">
+                            <option value="all" <?= ($_GET['filter_genre'] ?? 'all') === 'all' ? 'selected' : '' ?>>Tous les Genres</option>
+                            <?php foreach ($genres as $genre): ?>
+                                <option value="<?= htmlspecialchars($genre) ?>" <?= ($_GET['filter_genre'] ?? '') === $genre ? 'selected' : '' ?>>
+                                    <?= htmlspecialchars($genre) ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label for="filter_annee" class="form-label">Filtrer par Année</label>
+                        <input type="number" class="form-control" name="filter_annee" id="filter_annee" placeholder="Ex. 2020" value="<?= htmlspecialchars($_GET['filter_annee'] ?? '') ?>" onchange="this.form.submit()">
+                    </div>
+                    <div class="col-md-4">
+                        <label for="search_livre" class="form-label">Rechercher</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" name="search_livre" id="search_livre" placeholder="Titre ou Auteur..." value="<?= htmlspecialchars($_GET['search_livre'] ?? '') ?>">
+                            <button type="submit" class="btn btn-primary" data-bs-toggle="tooltip" title="Rechercher un livre"><i class="bi bi-search"></i></button>
+                        </div>
+                    </div>
                 </div>
             </form>
-            <!-- Liste des livres -->
+            <?php if ((isset($_GET['search_livre']) && !empty($_GET['search_livre'])) || (isset($_GET['filter_genre']) && $_GET['filter_genre'] !== 'all') || (isset($_GET['filter_annee']) && !empty($_GET['filter_annee']))): ?>
+                <a href="?section=list_livres" class="btn btn-secondary mb-3"><i class="bi bi-x-circle"></i> Réinitialiser les Filtres</a>
+            <?php endif; ?>
             <div class="table-responsive">
                 <table class="table table-striped">
                     <thead>
@@ -339,77 +1053,116 @@ $section = $_GET['section'] ?? 'dashboard';
                             <th>Auteur</th>
                             <th>Année</th>
                             <th>Genre</th>
+                            <th>Statut</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach ($livres as $livre): ?>
+                        <?php foreach ($livres_disponibles as $livre): ?>
                             <tr>
                                 <td><?= htmlspecialchars($livre['id_livre']) ?></td>
                                 <td><?= htmlspecialchars($livre['titre']) ?></td>
                                 <td><?= htmlspecialchars($livre['auteur']) ?></td>
                                 <td><?= htmlspecialchars($livre['annee'] ?: '-') ?></td>
                                 <td><?= htmlspecialchars($livre['genre'] ?: '-') ?></td>
+                                <td>
+                                    <?php if ($livre['disponible']): ?>
+                                        <span class="disponible">Disponible</span>
+                                    <?php else: ?>
+                                        <span class="emprunte">Emprunté</span>
+                                    <?php endif; ?>
+                                </td>
                                 <td class="actions">
-                                    <!-- Formulaire pour modifier -->
-                                    <form method="post" class="d-inline">
-                                        <input type="hidden" name="action" value="edit_livre">
-                                        <input type="hidden" name="id_livre" value="<?= $livre['id_livre'] ?>">
-                                        <input type="text" name="titre" value="<?= htmlspecialchars($livre['titre']) ?>" required class="form-control d-inline-block" style="width: 150px;">
-                                        <input type="text" name="auteur" value="<?= htmlspecialchars($livre['auteur']) ?>" required class="form-control d-inline-block" style="width: 150px;">
-                                        <input type="number" name="annee" value="<?= htmlspecialchars($livre['annee']) ?>" class="form-control d-inline-block" style="width: 80px;">
-                                        <input type="text" name="genre" value="<?= htmlspecialchars($livre['genre']) ?>" class="form-control d-inline-block" style="width: 100px;">
-                                        <button type="submit" class="btn btn-sm btn-warning">Modifier</button>
-                                    </form>
-                                    <!-- Formulaire pour supprimer -->
+                                    <button type="button" class="btn btn-sm btn-warning" data-bs-toggle="modal" data-bs-target="#editLivreModal<?= $livre['id_livre'] ?>" data-bs-toggle="tooltip" title="Modifier ce livre">
+                                        <i class="bi bi-pencil"></i>
+                                    </button>
                                     <form method="post" class="d-inline">
                                         <input type="hidden" name="action" value="delete_livre">
                                         <input type="hidden" name="id_livre" value="<?= $livre['id_livre'] ?>">
-                                        <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Confirmer la suppression ?')">Supprimer</button>
+                                        <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Confirmer la suppression ?')" data-bs-toggle="tooltip" title="Supprimer ce livre">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
                                     </form>
                                 </td>
                             </tr>
+                            <!-- Modal pour modifier un livre -->
+                            <div class="modal fade" id="editLivreModal<?= $livre['id_livre'] ?>" tabindex="-1" aria-labelledby="editLivreModalLabel<?= $livre['id_livre'] ?>" aria-hidden="true">
+                                <div class="modal-dialog">
+                                    <div class="modal-content">
+                                        <div class="modal-header">
+                                            <h5 class="modal-title" id="editLivreModalLabel<?= $livre['id_livre'] ?>">Modifier le Livre</h5>
+                                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                        </div>
+                                        <div class="modal-body">
+                                            <form method="post">
+                                                <input type="hidden" name="action" value="edit_livre">
+                                                <input type="hidden" name="id_livre" value="<?= $livre['id_livre'] ?>">
+                                                <div class="mb-3">
+                                                    <label for="titre_<?= $livre['id_livre'] ?>" class="form-label">Titre</label>
+                                                    <input type="text" class="form-control" name="titre" id="titre_<?= $livre['id_livre'] ?>" value="<?= htmlspecialchars($livre['titre']) ?>" required>
+                                                </div>
+                                                <div class="mb-3">
+                                                    <label for="auteur_<?= $livre['id_livre'] ?>" class="form-label">Auteur</label>
+                                                    <input type="text" class="form-control" name="auteur" id="auteur_<?= $livre['id_livre'] ?>" value="<?= htmlspecialchars($livre['auteur']) ?>" required>
+                                                </div>
+                                                <div class="mb-3">
+                                                    <label for="annee_<?= $livre['id_livre'] ?>" class="form-label">Année</label>
+                                                    <input type="number" class="form-control" name="annee" id="annee_<?= $livre['id_livre'] ?>" value="<?= htmlspecialchars($livre['annee']) ?>">
+                                                </div>
+                                                <div class="mb-3">
+                                                    <label for="genre_<?= $livre['id_livre'] ?>" class="form-label">Genre</label>
+                                                    <input type="text" class="form-control" name="genre" id="genre_<?= $livre['id_livre'] ?>" value="<?= htmlspecialchars($livre['genre']) ?>">
+                                                </div>
+                                                <button type="submit" class="btn btn-primary">Enregistrer</button>
+                                            </form>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                         <?php endforeach; ?>
                     </tbody>
                 </table>
             </div>
+            <a href="?section=dashboard" class="btn btn-secondary mt-3"><i class="bi bi-arrow-left"></i> Retour</a>
 
         <?php elseif ($section === 'add_utilisateur'): ?>
             <!-- Formulaire pour ajouter un utilisateur -->
-            <h2>Ajouter un utilisateur</h2>
-            <form method="post" class="row g-3">
-                <input type="hidden" name="action" value="add_utilisateur">
-                <div class="col-md-4">
-                    <label for="nom" class="form-label">Nom</label>
-                    <input type="text" class="form-control" name="nom" id="nom" placeholder="Nom" required>
-                </div>
-                <div class="col-md-4">
-                    <label for="prenom" class="form-label">Prénom</label>
-                    <input type="text" class="form-control" name="prenom" id="prenom" placeholder="Prénom" required>
-                </div>
-                <div class="col-md-4">
-                    <label for="email" class="form-label">Email</label>
-                    <input type="email" class="form-control" name="email" id="email" placeholder="Email" required>
-                </div>
-                <div class="col-12">
-                    <button type="submit" class="btn btn-primary">Ajouter</button>
-                </div>
-            </form>
+            <div class="form-section">
+                <h2><i class="bi bi-person-plus"></i> Ajouter un Utilisateur</h2>
+                <form method="post" class="row g-3">
+                    <input type="hidden" name="action" value="add_utilisateur">
+                    <div class="col-md-6">
+                        <label for="nom" class="form-label">Nom <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" name="nom" id="nom" placeholder="Ex. Dupont" required>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="prenom" class="form-label">Prénom <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" name="prenom" id="prenom" placeholder="Ex. Jean" required>
+                    </div>
+                    <div class="col-12">
+                        <label for="email" class="form-label">Email <span class="text-danger">*</span></label>
+                        <input type="email" class="form-control" name="email" id="email" placeholder="Ex. jean.dupont@example.com" required>
+                    </div>
+                    <div class="col-12 d-flex justify-content-between">
+                        <a href="?section=dashboard" class="btn btn-secondary"><i class="bi bi-arrow-left"></i> Retour</a>
+                        <button type="submit" class="btn btn-primary"><i class="bi bi-plus-circle"></i> Ajouter l'Utilisateur</button>
+                    </div>
+                </form>
+            </div>
 
         <?php elseif ($section === 'list_utilisateurs'): ?>
-            <!-- Formulaire de recherche pour les utilisateurs -->
-            <h2>Liste des utilisateurs</h2>
+            <!-- Liste des utilisateurs -->
+            <h2><i class="bi bi-people-fill"></i> Liste des Utilisateurs</h2>
             <form method="get" class="mb-3">
                 <input type="hidden" name="section" value="list_utilisateurs">
                 <div class="input-group">
-                    <input type="text" class="form-control" name="search_utilisateur" placeholder="Rechercher par nom..." value="<?= htmlspecialchars($_GET['search_utilisateur'] ?? '') ?>">
-                    <button type="submit" class="btn btn-primary">Rechercher</button>
-                    <?php if (isset($_GET['search_utilisateur']) && !empty($_GET['search_utilisateur'])): ?>
-                        <a href="?section=list_utilisateurs" class="btn btn-secondary">Réinitialiser</a>
-                    <?php endif; ?>
+                    <input type="text" class="form-control" name="search_utilisateur" placeholder="Rechercher par nom ou email..." value="<?= htmlspecialchars($_GET['search_utilisateur'] ?? '') ?>">
+                    <button type="submit" class="btn btn-primary" data-bs-toggle="tooltip" title="Rechercher un utilisateur"><i class="bi bi-search"></i></button>
                 </div>
             </form>
-            <!-- Liste des utilisateurs -->
+            <?php if (isset($_GET['search_utilisateur']) && !empty($_GET['search_utilisateur'])): ?>
+                <a href="?section=list_utilisateurs" class="btn btn-secondary mb-3"><i class="bi bi-x-circle"></i> Réinitialiser</a>
+            <?php endif; ?>
             <div class="table-responsive">
                 <table class="table table-striped">
                     <thead>
@@ -429,59 +1182,112 @@ $section = $_GET['section'] ?? 'dashboard';
                                 <td><?= htmlspecialchars($utilisateur['prenom']) ?></td>
                                 <td><?= htmlspecialchars($utilisateur['email']) ?></td>
                                 <td class="actions">
-                                    <!-- Formulaire pour modifier -->
-                                    <form method="post" class="d-inline">
-                                        <input type="hidden" name="action" value="edit_utilisateur">
-                                        <input type="hidden" name="id_utilisateur" value="<?= $utilisateur['id_utilisateur'] ?>">
-                                        <input type="text" name="nom" value="<?= htmlspecialchars($utilisateur['nom']) ?>" required class="form-control d-inline-block" style="width: 120px;">
-                                        <input type="text" name="prenom" value="<?= htmlspecialchars($utilisateur['prenom']) ?>" required class="form-control d-inline-block" style="width: 120px;">
-                                        <input type="email" name="email" value="<?= htmlspecialchars($utilisateur['email']) ?>" required class="form-control d-inline-block" style="width: 200px;">
-                                        <button type="submit" class="btn btn-sm btn-warning">Modifier</button>
-                                    </form>
-                                    <!-- Formulaire pour supprimer -->
+                                    <button type="button" class="btn btn-sm btn-warning" data-bs-toggle="modal" data-bs-target="#editUtilisateurModal<?= $utilisateur['id_utilisateur'] ?>" data-bs-toggle="tooltip" title="Modifier cet utilisateur">
+                                        <i class="bi bi-pencil"></i>
+                                    </button>
                                     <form method="post" class="d-inline">
                                         <input type="hidden" name="action" value="delete_utilisateur">
                                         <input type="hidden" name="id_utilisateur" value="<?= $utilisateur['id_utilisateur'] ?>">
-                                        <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Confirmer la suppression ?')">Supprimer</button>
+                                        <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Confirmer la suppression ?')" data-bs-toggle="tooltip" title="Supprimer cet utilisateur">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
                                     </form>
                                 </td>
                             </tr>
+                            <!-- Modal pour modifier un utilisateur -->
+                            <div class="modal fade" id="editUtilisateurModal<?= $utilisateur['id_utilisateur'] ?>" tabindex="-1" aria-labelledby="editUtilisateurModalLabel<?= $utilisateur['id_utilisateur'] ?>" aria-hidden="true">
+                                <div class="modal-dialog">
+                                    <div class="modal-content">
+                                        <div class="modal-header">
+                                            <h5 class="modal-title" id="editUtilisateurModalLabel<?= $utilisateur['id_utilisateur'] ?>">Modifier l'Utilisateur</h5>
+                                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                        </div>
+                                        <div class="modal-body">
+                                            <form method="post">
+                                                <input type="hidden" name="action" value="edit_utilisateur">
+                                                <input type="hidden" name="id_utilisateur" value="<?= $utilisateur['id_utilisateur'] ?>">
+                                                <div class="mb-3">
+                                                    <label for="nom_<?= $utilisateur['id_utilisateur'] ?>" class="form-label">Nom</label>
+                                                    <input type="text" class="form-control" name="nom" id="nom_<?= $utilisateur['id_utilisateur'] ?>" value="<?= htmlspecialchars($utilisateur['nom']) ?>" required>
+                                                </div>
+                                                <div class="mb-3">
+                                                    <label for="prenom_<?= $utilisateur['id_utilisateur'] ?>" class="form-label">Prénom</label>
+                                                    <input type="text" class="form-control" name="prenom" id="prenom_<?= $utilisateur['id_utilisateur'] ?>" value="<?= htmlspecialchars($utilisateur['prenom']) ?>" required>
+                                                </div>
+                                                <div class="mb-3">
+                                                    <label for="email_<?= $utilisateur['id_utilisateur'] ?>" class="form-label">Email</label>
+                                                    <input type="email" class="form-control" name="email" id="email_<?= $utilisateur['id_utilisateur'] ?>" value="<?= htmlspecialchars($utilisateur['email']) ?>" required>
+                                                </div>
+                                                <button type="submit" class="btn btn-primary">Enregistrer</button>
+                                            </form>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                         <?php endforeach; ?>
                     </tbody>
                 </table>
             </div>
+            <a href="?section=dashboard" class="btn btn-secondary mt-3"><i class="bi bi-arrow-left"></i> Retour</a>
 
         <?php elseif ($section === 'add_emprunt'): ?>
             <!-- Formulaire pour ajouter un emprunt -->
-            <h2>Ajouter un emprunt</h2>
-            <form method="post" class="row g-3">
-                <input type="hidden" name="action" value="add_emprunt">
-                <div class="col-md-6">
-                    <label for="id_livre" class="form-label">Livre</label>
-                    <select name="id_livre" id="id_livre" class="form-select" required>
-                        <option value="">Sélectionner un livre</option>
-                        <?php foreach ($livres as $livre): ?>
-                            <option value="<?= $livre['id_livre'] ?>"><?= htmlspecialchars($livre['titre']) ?> (<?= htmlspecialchars($livre['auteur']) ?>)</option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-                <div class="col-md-6">
-                    <label for="id_utilisateur" class="form-label">Utilisateur</label>
-                    <select name="id_utilisateur" id="id_utilisateur" class="form-select" required>
-                        <option value="">Sélectionner un utilisateur</option>
-                        <?php foreach ($utilisateurs as $utilisateur): ?>
-                            <option value="<?= $utilisateur['id_utilisateur'] ?>"><?= htmlspecialchars($utilisateur['nom']) ?> <?= htmlspecialchars($utilisateur['prenom']) ?></option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-                <div class="col-12">
-                    <button type="submit" class="btn btn-primary">Enregistrer l'emprunt</button>
-                </div>
-            </form>
+            <div class="form-section">
+                <h2><i class="bi bi-arrow-right-circle"></i> Nouvel Emprunt</h2>
+                <form method="post" class="row g-3">
+                    <input type="hidden" name="action" value="add_emprunt">
+                    <div class="col-12">
+                        <label for="id_livre" class="form-label">Livre <span class="text-danger">*</span></label>
+                        <select name="id_livre" id="id_livre" class="form-select" required>
+                            <option value="">Sélectionner un livre</option>
+                            <?php foreach ($livres as $livre): ?>
+                                <option value="<?= $livre['id_livre'] ?>"><?= htmlspecialchars($livre['titre']) ?> (<?= htmlspecialchars($livre['auteur']) ?>) <?= in_array($livre['id_livre'], $emprunts_actifs) ? '[Emprunté]' : '' ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="col-12">
+                        <label for="id_utilisateur" class="form-label">Utilisateur <span class="text-danger">*</span></label>
+                        <select name="id_utilisateur" id="id_utilisateur" class="form-select" required>
+                            <option value="">Sélectionner un utilisateur</option>
+                            <?php foreach ($utilisateurs as $utilisateur): ?>
+                                <option value="<?= $utilisateur['id_utilisateur'] ?>"><?= htmlspecialchars($utilisateur['nom']) ?> <?= htmlspecialchars($utilisateur['prenom']) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="col-12 d-flex justify-content-between">
+                        <a href="?section=dashboard" class="btn btn-secondary"><i class="bi bi-arrow-left"></i> Retour</a>
+                        <button type="submit" class="btn btn-primary"><i class="bi bi-plus-circle"></i> Enregistrer l'Emprunt</button>
+                    </div>
+                </form>
+            </div>
 
         <?php elseif ($section === 'list_emprunts'): ?>
             <!-- Liste des emprunts -->
-            <h2>Liste des emprunts</h2>
+            <h2><i class="bi bi-list-check"></i> Liste des Emprunts</h2>
+            <form method="get" class="mb-3">
+                <input type="hidden" name="section" value="list_emprunts">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label for="filter_emprunts" class="form-label">Filtrer par Statut</label>
+                        <select name="filter_emprunts" id="filter_emprunts" class="form-select" onchange="this.form.submit()">
+                            <option value="all" <?= $filter === 'all' ? 'selected' : '' ?>>Tous les Emprunts</option>
+                            <option value="active" <?= $filter === 'active' ? 'selected' : '' ?>>Actifs</option>
+                            <option value="returned" <?= $filter === 'returned' ? 'selected' : '' ?>>Retournés</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label for="date_debut" class="form-label">Date de Début</label>
+                        <input type="date" class="form-control" name="date_debut" id="date_debut" value="<?= htmlspecialchars($_GET['date_debut'] ?? '') ?>" onchange="this.form.submit()">
+                    </div>
+                    <div class="col-md-4">
+                        <label for="date_fin" class="form-label">Date de Fin</label>
+                        <input type="date" class="form-control" name="date_fin" id="date_fin" value="<?= htmlspecialchars($_GET['date_fin'] ?? '') ?>" onchange="this.form.submit()">
+                    </div>
+                </div>
+            </form>
+            <?php if ((isset($_GET['filter_emprunts']) && $_GET['filter_emprunts'] !== 'all') || (isset($_GET['date_debut']) && !empty($_GET['date_debut'])) || (isset($_GET['date_fin']) && !empty($_GET['date_fin']))): ?>
+                <a href="?section=list_emprunts" class="btn btn-secondary mb-3"><i class="bi bi-x-circle"></i> Réinitialiser</a>
+            <?php endif; ?>
             <div class="table-responsive">
                 <table class="table table-striped">
                     <thead>
@@ -489,8 +1295,8 @@ $section = $_GET['section'] ?? 'dashboard';
                             <th>ID</th>
                             <th>Livre</th>
                             <th>Utilisateur</th>
-                            <th>Date d'emprunt</th>
-                            <th>Date de retour</th>
+                            <th>Date d'Emprunt</th>
+                            <th>Date de Retour</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -507,7 +1313,9 @@ $section = $_GET['section'] ?? 'dashboard';
                                         <form method="post" class="d-inline">
                                             <input type="hidden" name="action" value="return_emprunt">
                                             <input type="hidden" name="id_emprunt" value="<?= $emprunt['id_emprunt'] ?>">
-                                            <button type="submit" class="btn btn-sm btn-success">Marquer comme retourné</button>
+                                            <button type="submit" class="btn btn-sm btn-success" data-bs-toggle="tooltip" title="Marquer ce livre comme retourné">
+                                                <i class="bi bi-arrow-left-circle"></i> Retour
+                                            </button>
                                         </form>
                                     <?php endif; ?>
                                 </td>
@@ -516,12 +1324,45 @@ $section = $_GET['section'] ?? 'dashboard';
                     </tbody>
                 </table>
             </div>
+            <a href="?section=dashboard" class="btn btn-secondary mt-3"><i class="bi bi-arrow-left"></i> Retour</a>
 
+        <?php elseif ($section === 'stats'): ?>
+            <!-- Section Statistiques -->
+            <h2><i class="bi bi-bar-chart"></i> Statistiques</h2>
+            <h3>Nombre d'Emprunts par Utilisateur</h3>
+            <div class="table-responsive">
+                <table class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>Utilisateur</th>
+                            <th>Nombre Total d'Emprunts</th>
+                            <th>Emprunts Actifs</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($stats as $stat): ?>
+                            <tr>
+                                <td><?= htmlspecialchars($stat['nom']) ?> <?= htmlspecialchars($stat['prenom']) ?></td>
+                                <td><?= htmlspecialchars($stat['total_emprunts']) ?></td>
+                                <td><?= htmlspecialchars($stat['emprunts_actifs']) ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+            <a href="?section=dashboard" class="btn btn-secondary mt-3"><i class="bi bi-arrow-left"></i> Retour</a>
         <?php endif; ?>
     </div>
 
     <!-- Bootstrap JS -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Activer les tooltips
+        var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+        var tooltipList = tooltipTriggerList.map(function(tooltipTriggerEl) {
+            return new bootstrap.Tooltip(tooltipTriggerEl);
+        });
+    </script>
 </body>
 
 </html>
